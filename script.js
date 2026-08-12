@@ -5,6 +5,9 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const DATA_KEY = "taskflowProjectData";
 const SETTINGS_KEY = "taskflowSettings";
+const AUTH_SESSION_KEY = "taskflow-auth-session";
+/* Demo-only POC authentication. Replace this credential check with secure server-side authentication before production. */
+const DEMO_USERS = [{ email: "pavankalyan@example.com", password: "TaskFlow@123", name: "Pavankalyan Garavandala", role: "User" }];
 const REQUIRED = ["id", "teamMember", "project", "role", "currentWork", "status", "expectedCompletionDate"];
 const STATUS_VALUES = ["Ongoing", "Completed", "On Hold", "Not Started", "Blocked"];
 const DASHBOARD_MEMBER_LIMIT = 6;
@@ -17,15 +20,28 @@ let reportsChart = null;
 let pendingConfirmation = null;
 let toastTimer;
 let memberFormSkills = [];
+let activeSettingsTab = "profile";
 
 function loadSettings() {
-  try { return { name: "Alex Morgan", email: "alex@taskflow.com", theme: "light", notifications: true, language: "en", ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") }; }
-  catch { return { name: "Alex Morgan", email: "alex@taskflow.com", theme: "light", notifications: true, language: "en" }; }
+  const defaults = { name: "Alex Morgan", email: "alex@taskflow.com", role: "Project Manager", theme: "light", notifications: true, language: "en", emailNotifications: true, taskReminders: true, deadlineAlerts: true, teamUpdates: false };
+  try { const stored = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}"); return { ...defaults, ...stored, taskReminders: stored.taskReminders ?? stored.notifications ?? defaults.taskReminders }; }
+  catch { return defaults; }
 }
 function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
 function loadProjectData() { try { const value = JSON.parse(localStorage.getItem(DATA_KEY) || "[]"); return Array.isArray(value) ? value.map(normalizeMemberRecord) : []; } catch { return []; } }
 function saveProjectData(data = projectData) { projectData = data; localStorage.setItem(DATA_KEY, JSON.stringify(projectData)); }
 function escapeHTML(value = "") { const div = document.createElement("div"); div.textContent = String(value); return div.innerHTML; }
+function getAuthSession() { for (const storage of [sessionStorage, localStorage]) { try { const session = JSON.parse(storage.getItem(AUTH_SESSION_KEY) || "null"); if (session?.authenticated) return session; } catch {} } return null; }
+function createAuthSession(user, remember) { const session = { authenticated: true, email: user.email, name: user.name }; localStorage.removeItem(AUTH_SESSION_KEY); sessionStorage.removeItem(AUTH_SESSION_KEY); (remember ? localStorage : sessionStorage).setItem(AUTH_SESSION_KEY, JSON.stringify(session)); return session; }
+function clearAuthSession() { localStorage.removeItem(AUTH_SESSION_KEY); sessionStorage.removeItem(AUTH_SESSION_KEY); }
+function authenticateUser(email, password) { return DEMO_USERS.find(user => user.email.toLowerCase() === email.toLowerCase() && user.password === password) || null; }
+function showLoginPage() { $("#taskflowApp").hidden = true; $("#loginPage").hidden = false; $("#profileMenu").classList.remove("open"); $("#loginPassword").value = ""; $("#loginPassword").type = "password"; $("#toggleLoginPassword").setAttribute("aria-label", "Show password"); document.title = "TaskFlow — Login"; setTimeout(() => $("#loginEmail").focus(), 0); }
+function showApplication() { $("#loginPage").hidden = true; $("#taskflowApp").hidden = false; switchPage("dashboard", "replace"); }
+function initializeAuthentication() { getAuthSession() ? showApplication() : showLoginPage(); }
+function handleLogout() { clearAuthSession(); showLoginPage(); }
+function showAuthNotice(message) { $("#authNotice").textContent = message; }
+function validateLoginForm() { const email = $("#loginEmail").value.trim(), password = $("#loginPassword").value, emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email); $("#loginEmailError").textContent = emailValid ? "" : "Please enter a valid email address."; $("#loginPasswordError").textContent = password.trim() ? "" : "Password is required."; return { valid: emailValid && Boolean(password.trim()), email, password }; }
+function handleLogin(event) { event.preventDefault(); const result = validateLoginForm(); $("#loginAuthError").textContent = ""; if (!result.valid) return; const button = $("#loginButton"); button.disabled = true; button.textContent = "Logging in..."; setTimeout(() => { const user = authenticateUser(result.email, result.password); if (user) { createAuthSession(user, $("#rememberMe").checked); showApplication(); showToast("Login successful."); } else { $("#loginAuthError").textContent = "Invalid email address or password."; } button.disabled = false; button.textContent = "Login"; }, 250); }
 function localDate(value) { if (!value) return null; const parts = value.split("-").map(Number); if (parts.length !== 3) return null; const date = new Date(parts[0], parts[1] - 1, parts[2]); date.setHours(0, 0, 0, 0); return Number.isNaN(date.getTime()) ? null : date; }
 function formatDate(value) { const date = localDate(value); return date ? date.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }).replace(/ /g, "-") : "Invalid date"; }
 function todayStart() { const date = new Date(); date.setHours(0, 0, 0, 0); return date; }
@@ -307,9 +323,16 @@ function renderReports() {
 }
 
 /* Settings, support and shared UI */
-function applySettings() { const words = settings.name.trim().split(/\s+/); const avatar = words.slice(0, 2).map(word => word[0]).join("").toUpperCase() || "U"; $("#headerName").textContent = settings.name; $$(".avatar").forEach(node => node.textContent = avatar); $("#nameInput").value = settings.name; $("#emailInput").value = settings.email; $("#themeToggle").checked = settings.theme === "dark"; $("#notificationToggle").checked = settings.notifications; $("#languageSelect").value = settings.language; document.body.classList.toggle("dark", settings.theme === "dark"); }
-function clearAllProjectData() { askConfirmation("Clear all project data?", "All imported and manually added team project records will be removed. Your profile and preferences will remain.", () => { projectData = []; localStorage.removeItem(DATA_KEY); refreshAll(); showToast("All team project data cleared."); }); }
-function askConfirmation(title, text, action) { $("#confirmTitle").textContent = title; $("#confirmText").textContent = text; pendingConfirmation = action; $("#confirmModal").classList.add("open"); }
+function applySettings() {
+  const words = settings.name.trim().split(/\s+/), avatar = words.slice(0, 2).map(word => word[0]).join("").toUpperCase() || "U", roleSelect = $("#roleSelect");
+  $("#headerName").textContent = settings.name; $$(".avatar").forEach(node => node.textContent = avatar); $("#nameInput").value = settings.name; $("#emailInput").value = settings.email;
+  if (![...roleSelect.options].some(option => option.value === settings.role)) roleSelect.add(new Option(settings.role, settings.role));
+  roleSelect.value = settings.role; $("#themeToggle").checked = settings.theme === "dark"; $$('[data-notification-key]').forEach(toggle => toggle.checked = Boolean(settings[toggle.dataset.notificationKey])); $("#languageSelect").value = settings.language; document.body.classList.toggle("dark", settings.theme === "dark");
+}
+function setTheme(theme) { settings.theme = theme; saveSettings(); applySettings(); renderStatusChart(); renderReports(); }
+function clearAllProjectData() { askConfirmation("Clear All Data?", "This will permanently remove all imported team project data. Your profile and preferences will remain.", () => { projectData = []; localStorage.removeItem(DATA_KEY); refreshAll(); showToast("All team project data cleared."); }, "Clear Data"); }
+function activateSettingsTab(tab) { if (!["profile", "preferences", "notifications", "security"].includes(tab)) return; activeSettingsTab = tab; $$("[data-settings-tab]").forEach(button => { const active = button.dataset.settingsTab === tab; button.classList.toggle("active", active); button.setAttribute("aria-selected", String(active)); }); $$("[data-settings-panel]").forEach(panel => { const active = panel.dataset.settingsPanel === tab; panel.hidden = !active; panel.classList.toggle("active", active); }); }
+function askConfirmation(title, text, action, confirmLabel = "Confirm") { $("#confirmTitle").textContent = title; $("#confirmText").textContent = text; $("#confirmAction").textContent = confirmLabel; pendingConfirmation = action; $("#confirmModal").classList.add("open"); }
 function closeModal(id) { $("#" + id)?.classList.remove("open"); if (id === "memberModal") { document.body.classList.remove("member-modal-open"); clearMemberErrors(); $("#memberForm").reset(); resetBlockerPicker(); resetMemberSkills(); $("#originalMemberId").value = ""; $("#memberModalTitle").textContent = "Add Member"; $("#memberSubmitBtn").textContent = "Save Member"; } }
 function showToast(message, type = "success", duration = 2600) { const toast = $("#toast"); toast.textContent = message; toast.className = `toast show ${type}`; clearTimeout(toastTimer); toastTimer = setTimeout(() => toast.classList.remove("show"), duration); }
 const supportContent = {
@@ -320,11 +343,18 @@ const supportContent = {
   about: `<div class="about-content"><div class="about-logo">✓</div><h3>TaskFlow</h3><strong>Team Project Involvement Dashboard</strong><p>Built with HTML, CSS, JavaScript, SheetJS and Chart.js.</p><p>Your data is stored locally in this browser.</p></div>`
 };
 function openSupport(type) { const titles = { faq: "Frequently Asked Questions", guide: "User Guide", shortcuts: "Keyboard Shortcuts", problem: "Report a Problem", about: "About TaskFlow" }; $("#supportModalTitle").textContent = titles[type]; $("#supportModalContent").innerHTML = type === "faq" ? `<div class="faq-list">${supportContent.faq.map((q, i) => `<details ${i === 0 ? "open" : ""}><summary>${q}</summary><p>${["Use any Import Excel control, then select a spreadsheet whose first sheet contains the required columns.", "TaskFlow supports .xlsx and .xls files.", "Statistics are calculated live from unique team members, projects, statuses, blocker values and due dates.", "Yes. Use the card menu and select Edit; updates are saved immediately.", "Any value other than blank, None, No, N/A, NA or Not Applicable is treated as a blocker.", "Rows whose normalized Status is Completed are considered complete."][i]}</p></details>`).join("")}</div>` : supportContent[type]; $("#supportModal").classList.add("open"); }
-function switchPage(page, historyMode = "push") { const valid = ["dashboard", "members", "reports", "settings"]; if (!valid.includes(page)) page = "dashboard"; $$(".page").forEach(section => section.classList.toggle("active", section.id === `${page}Page`)); $$(".nav-item").forEach(item => item.classList.toggle("active", item.dataset.page === page)); const title = page === "members" ? "Team Members" : page[0].toUpperCase() + page.slice(1); $("#headerPageTitle").textContent = title; document.title = `TaskFlow — ${title}`; if (historyMode === "push") history.pushState({ page }, "", `#${page}`); $("#sidebar").classList.remove("open"); $("#mobileOverlay").classList.remove("open"); if (page === "reports") renderReports(); window.scrollTo({ top: 0, behavior: "smooth" }); }
+function switchPage(page, historyMode = "push") { if (!getAuthSession()) { showLoginPage(); return; } const valid = ["dashboard", "members", "reports", "settings"]; if (!valid.includes(page)) page = "dashboard"; $$(".page").forEach(section => section.classList.toggle("active", section.id === `${page}Page`)); $$(".nav-item").forEach(item => item.classList.toggle("active", item.dataset.page === page)); const title = page === "members" ? "Team Members" : page[0].toUpperCase() + page.slice(1); $("#headerPageTitle").textContent = title; document.title = `TaskFlow — ${title}`; if (historyMode === "push") history.pushState({ page }, "", `#${page}`); else if (historyMode === "replace") history.replaceState({ page }, "", `#${page}`); $("#sidebar").classList.remove("open"); $("#mobileOverlay").classList.remove("open"); if (page === "reports") renderReports(); window.scrollTo({ top: 0, behavior: "smooth" }); }
 function page(name) { switchPage(name); }
 function refreshAll() { renderDashboardStats(); renderCurrentTeamInvolvement(); renderUpcomingDeadlines(); populateProjectFilters(); populateRoleFilters(); renderTeamMembers(); renderStatusChart(); renderReports(); $("#navMemberCount").textContent = unique(projectData.map(item => item.teamMember.toLowerCase())).length; }
 
 /* Event wiring */
+$("#loginForm").addEventListener("submit", handleLogin);
+$("#loginForm").addEventListener("input", event => { if (event.target.id === "loginEmail") $("#loginEmailError").textContent = ""; if (event.target.id === "loginPassword") $("#loginPasswordError").textContent = ""; $("#loginAuthError").textContent = ""; });
+$("#toggleLoginPassword").addEventListener("click", () => { const input = $("#loginPassword"), show = input.type === "password"; input.type = show ? "text" : "password"; $("#toggleLoginPassword").setAttribute("aria-label", show ? "Hide password" : "Show password"); });
+$("#forgotPassword").addEventListener("click", () => showAuthNotice("Please contact your administrator to reset your password."));
+$("#googleSignIn").addEventListener("click", () => showAuthNotice("Google sign-in is not configured."));
+$("#contactAdmin").addEventListener("click", () => showAuthNotice("Please contact your TaskFlow administrator for account access."));
+document.addEventListener("keydown", event => { if (!getAuthSession() && event.ctrlKey) event.stopImmediatePropagation(); }, true);
 $$('[data-import]').forEach(button => button.addEventListener("click", () => $("#excelInput").click()));
 $("#excelInput").addEventListener("change", event => importExcelFile(event.target.files[0]));
 $$('.nav-item').forEach(button => button.addEventListener("click", () => switchPage(button.dataset.page)));
@@ -351,18 +381,23 @@ $$('[data-close]').forEach(button => button.addEventListener("click", () => clos
 $$('.modal-backdrop').forEach(backdrop => backdrop.addEventListener("click", event => { if (event.target === backdrop) closeModal(backdrop.id); }));
 $("#clearDataBtn").addEventListener("click", clearAllProjectData);
 $("#confirmAction").addEventListener("click", () => { const action = pendingConfirmation; pendingConfirmation = null; closeModal("confirmModal"); action?.(); });
-$("#profileForm").addEventListener("submit", event => { event.preventDefault(); settings.name = $("#nameInput").value.trim(); settings.email = $("#emailInput").value.trim(); saveSettings(); applySettings(); showToast("Profile saved."); });
-$("#themeToggle").addEventListener("change", event => { settings.theme = event.target.checked ? "dark" : "light"; saveSettings(); applySettings(); renderStatusChart(); renderReports(); });
-$("#notificationToggle").addEventListener("change", event => { settings.notifications = event.target.checked; saveSettings(); showToast(`Notifications ${settings.notifications ? "enabled" : "disabled"}.`); });
+$("#profileForm").addEventListener("submit", event => { event.preventDefault(); const name = $("#nameInput").value.trim(), email = $("#emailInput").value.trim(), emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email); $("#nameError").textContent = name ? "" : "Full Name is required."; $("#emailError").textContent = email ? (emailValid ? "" : "Enter a valid email address.") : "Email Address is required."; if (!name || !emailValid) return; settings.name = name; settings.email = email; settings.role = $("#roleSelect").value; saveSettings(); applySettings(); showToast("Profile updated successfully."); });
+$("#profileForm").addEventListener("input", event => { const error = event.target.id === "nameInput" ? $("#nameError") : event.target.id === "emailInput" ? $("#emailError") : null; if (error) error.textContent = ""; });
+$("#passwordForm").addEventListener("submit", event => { event.preventDefault(); const current = $("#currentPassword").value, next = $("#newPassword").value, confirm = $("#confirmPassword").value; $("#currentPasswordError").textContent = current.trim() ? "" : "Current Password is required."; $("#newPasswordError").textContent = next.trim() ? "" : "New Password is required."; $("#confirmPasswordError").textContent = !confirm.trim() ? "Confirm New Password is required." : confirm === next ? "" : "Passwords do not match."; if (!current.trim() || !next.trim() || !confirm.trim() || confirm !== next) return; event.target.reset(); showToast("Password updated for this local demo session."); });
+$("#passwordForm").addEventListener("input", event => { const error = $(`#${event.target.id}Error`); if (error) error.textContent = ""; });
+$$('[data-password-toggle]').forEach(button => button.addEventListener("click", () => { const input = $("#" + button.dataset.passwordToggle), show = input.type === "password"; input.type = show ? "text" : "password"; button.textContent = show ? "⊘" : "◉"; button.setAttribute("aria-label", `${show ? "Hide" : "Show"} ${button.dataset.passwordToggle === "newPassword" ? "new" : "confirm"} password`); }));
+$$('[data-settings-tab]').forEach(button => button.addEventListener("click", () => activateSettingsTab(button.dataset.settingsTab)));
+$("#themeToggle").addEventListener("change", event => setTheme(event.target.checked ? "dark" : "light"));
+$$('[data-notification-key]').forEach(toggle => toggle.addEventListener("change", event => { const key = event.target.dataset.notificationKey; settings[key] = event.target.checked; if (key === "taskReminders") settings.notifications = event.target.checked; saveSettings(); showToast(`${event.target.closest(".notification-setting-row").querySelector("strong").textContent} ${event.target.checked ? "enabled" : "disabled"}.`); }));
 $("#languageSelect").addEventListener("change", event => { settings.language = event.target.value; saveSettings(); showToast("Language updated successfully."); });
 $(".support-options").addEventListener("click", event => { const button = event.target.closest("[data-support]"); if (button) openSupport(button.dataset.support); });
 $("#supportModalContent").addEventListener("submit", event => { if (event.target.id === "problemForm") { event.preventDefault(); closeModal("supportModal"); showToast("Problem report submitted successfully."); } });
 $("#profileButton").addEventListener("click", event => { event.stopPropagation(); $("#profileMenu").classList.toggle("open"); });
-$("#profileMenu").addEventListener("click", event => { if (["profile", "settings"].includes(event.target.dataset.action)) switchPage("settings"); if (event.target.dataset.action === "signout") showToast("You’re signed out of this demo."); });
+$("#profileMenu").addEventListener("click", event => { if (["profile", "settings"].includes(event.target.dataset.action)) switchPage("settings"); if (event.target.dataset.action === "signout") handleLogout(); });
 $("#menuBtn").addEventListener("click", () => { $("#sidebar").classList.add("open"); $("#mobileOverlay").classList.add("open"); });
 $("#mobileOverlay").addEventListener("click", () => { $("#sidebar").classList.remove("open"); $("#mobileOverlay").classList.remove("open"); });
 document.addEventListener("click", () => { $("#profileMenu").classList.remove("open"); $$(".task-action-menu.open").forEach(menu => menu.classList.remove("open")); });
 document.addEventListener("keydown", event => { if (event.key === "Escape") $$(".modal-backdrop.open").forEach(modal => closeModal(modal.id)); if (event.key === "Tab" && $("#memberModal").classList.contains("open")) { const focusable = $$('button:not([disabled]), input:not([disabled]):not([type="hidden"]), textarea:not([disabled]), select:not([disabled])', $("#memberModal")).filter(node => node.offsetParent !== null); if (focusable.length) { const first = focusable[0], last = focusable[focusable.length - 1]; if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); } } } if (event.ctrlKey && event.key.toLowerCase() === "n") { event.preventDefault(); openMemberModal(); } if (event.ctrlKey && event.key.toLowerCase() === "i") { event.preventDefault(); $("#excelInput").click(); } if (event.ctrlKey && event.key.toLowerCase() === "f" && $("#membersPage").classList.contains("active")) { event.preventDefault(); $("#memberSearch").focus(); } });
 window.addEventListener("popstate", () => switchPage(location.hash.slice(1) || "dashboard", "none"));
 
-applySettings(); refreshAll(); switchPage(location.hash.slice(1) || "dashboard", "replace");
+activateSettingsTab(activeSettingsTab); applySettings(); refreshAll(); initializeAuthentication();
