@@ -5,15 +5,12 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const DATA_KEY = "taskflowProjectData";
 const SETTINGS_KEY = "taskflowSettings";
-const AUTH_SESSION_KEY = "taskflow-auth-session";
-/* Demo-only POC authentication. Replace this credential check with secure server-side authentication before production. */
-const DEMO_USERS = [{ email: "pavankalyan@example.com", password: "TaskFlow@123", name: "Pavankalyan Garavandala", role: "User" }];
 const REQUIRED = ["id", "teamMember", "project", "role", "currentWork", "status", "expectedCompletionDate"];
 const STATUS_VALUES = ["Ongoing", "Completed", "On Hold", "Not Started", "Blocked"];
 const DASHBOARD_MEMBER_LIMIT = 6;
 let showAllDashboardMembers = false;
 const dashboardInvolvementFilters = { status: "all", project: "all", role: "all", technology: "all", skill: "all", dueDate: "all", blockers: "all" };
-let projectData = loadProjectData();
+let projectData = [];
 let settings = loadSettings();
 let dashboardChart = null;
 let reportsChart = null;
@@ -21,6 +18,8 @@ let pendingConfirmation = null;
 let toastTimer;
 let memberFormSkills = [];
 let activeSettingsTab = "profile";
+let authenticatedUser = null;
+let csrfToken = "";
 
 function loadSettings() {
   const defaults = { name: "Alex Morgan", email: "alex@taskflow.com", role: "Project Manager", theme: "light", notifications: true, language: "en", emailNotifications: true, taskReminders: true, deadlineAlerts: true, teamUpdates: false };
@@ -28,20 +27,29 @@ function loadSettings() {
   catch { return defaults; }
 }
 function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
-function loadProjectData() { try { const value = JSON.parse(localStorage.getItem(DATA_KEY) || "[]"); return Array.isArray(value) ? value.map(normalizeMemberRecord) : []; } catch { return []; } }
-function saveProjectData(data = projectData) { projectData = data; localStorage.setItem(DATA_KEY, JSON.stringify(projectData)); }
+function loadProjectData() { return []; }
 function escapeHTML(value = "") { const div = document.createElement("div"); div.textContent = String(value); return div.innerHTML; }
-function getAuthSession() { for (const storage of [sessionStorage, localStorage]) { try { const session = JSON.parse(storage.getItem(AUTH_SESSION_KEY) || "null"); if (session?.authenticated) return session; } catch {} } return null; }
-function createAuthSession(user, remember) { const session = { authenticated: true, email: user.email, name: user.name }; localStorage.removeItem(AUTH_SESSION_KEY); sessionStorage.removeItem(AUTH_SESSION_KEY); (remember ? localStorage : sessionStorage).setItem(AUTH_SESSION_KEY, JSON.stringify(session)); return session; }
-function clearAuthSession() { localStorage.removeItem(AUTH_SESSION_KEY); sessionStorage.removeItem(AUTH_SESSION_KEY); }
-function authenticateUser(email, password) { return DEMO_USERS.find(user => user.email.toLowerCase() === email.toLowerCase() && user.password === password) || null; }
-function showLoginPage() { $("#taskflowApp").hidden = true; $("#loginPage").hidden = false; $("#profileMenu").classList.remove("open"); $("#loginPassword").value = ""; $("#loginPassword").type = "password"; $("#toggleLoginPassword").setAttribute("aria-label", "Show password"); document.title = "TaskFlow — Login"; setTimeout(() => $("#loginEmail").focus(), 0); }
-function showApplication() { $("#loginPage").hidden = true; $("#taskflowApp").hidden = false; switchPage("dashboard", "replace"); }
-function initializeAuthentication() { getAuthSession() ? showApplication() : showLoginPage(); }
-function handleLogout() { clearAuthSession(); showLoginPage(); }
+function getAuthSession() { return authenticatedUser; }
+async function api(path, options = {}) {
+  const isFormData = options.body instanceof FormData;
+  const headers = { Accept: "application/json", ...(!isFormData && options.body ? { "Content-Type": "application/json" } : {}), ...options.headers };
+  const response = await fetch(path, { ...options, credentials: "include", headers });
+  const contentType = response.headers.get("content-type") || "";
+  const data = response.status === 204 ? null : contentType.includes("application/json") ? await response.json().catch(() => ({})) : {};
+  if (!response.ok || (response.status !== 204 && !contentType.includes("application/json"))) { const error = new Error(data?.message || (response.status >= 500 ? "Unable to complete the request. Please try again." : "Unable to connect to the TaskFlow service. Please run TaskFlow through its application server.")); error.status = response.status; throw error; }
+  if (data.csrfToken) csrfToken = data.csrfToken;
+  return data;
+}
+function showAuthView(view) { ["login", "register", "forgot", "reset"].forEach(name => { const card = $("#" + name + "Card"); card.hidden = name !== view; if (name === view) $$('.auth-field-error, .auth-form-error, .auth-notice', card).forEach(node => node.textContent = ""); }); }
+function showLoginPage() { authenticatedUser = null; $("#taskflowApp").hidden = true; $("#loginPage").hidden = false; showAuthView("login"); $("#profileMenu").classList.remove("open"); $("#loginPassword").value = ""; $("#loginPassword").type = "password"; $("#toggleLoginPassword").setAttribute("aria-label", "Show password"); document.title = "TaskFlow — Login"; setTimeout(() => $("#loginEmail").focus(), 0); }
+function useAuthenticatedUser(user) { authenticatedUser = user; settings.name = user.name; settings.email = user.email; settings.role = user.role || settings.role || "Project Manager"; saveSettings(); applySettings(); }
+async function loadMembers() { projectData = (await api("/api/members")).map(normalizeMemberRecord); refreshAll(); }
+async function showApplication(user = authenticatedUser) { if (user) useAuthenticatedUser(user); $("#loginPage").hidden = true; $("#taskflowApp").hidden = false; switchPage("dashboard", "replace"); try { await loadMembers(); } catch (error) { console.error(error); showToast("Unable to load team members.", "error"); } }
+async function initializeAuthentication() { const params = new URLSearchParams(location.search); try { const data = await api("/api/auth/me"); if (data.authenticated) { history.replaceState({}, "", location.pathname + location.hash); showApplication(data.user); return; } } catch {} showLoginPage(); if (params.get("auth_error") === "google") $("#loginAuthError").textContent = "Unable to sign in with Google. Please try again."; if (params.has("token")) { showAuthView("reset"); $("#resetCard").dataset.token = params.get("token"); } }
+async function handleLogout() { try { await api("/api/auth/logout", { method: "POST" }); } catch {} showLoginPage(); }
 function showAuthNotice(message) { $("#authNotice").textContent = message; }
-function validateLoginForm() { const email = $("#loginEmail").value.trim(), password = $("#loginPassword").value, emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email); $("#loginEmailError").textContent = emailValid ? "" : "Please enter a valid email address."; $("#loginPasswordError").textContent = password.trim() ? "" : "Password is required."; return { valid: emailValid && Boolean(password.trim()), email, password }; }
-function handleLogin(event) { event.preventDefault(); const result = validateLoginForm(); $("#loginAuthError").textContent = ""; if (!result.valid) return; const button = $("#loginButton"); button.disabled = true; button.textContent = "Logging in..."; setTimeout(() => { const user = authenticateUser(result.email, result.password); if (user) { createAuthSession(user, $("#rememberMe").checked); showApplication(); showToast("Login successful."); } else { $("#loginAuthError").textContent = "Invalid email address or password."; } button.disabled = false; button.textContent = "Login"; }, 250); }
+function validateLoginForm() { const email = $("#loginEmail").value.trim().toLowerCase(), password = $("#loginPassword").value, emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email); $("#loginEmailError").textContent = emailValid ? "" : "Please enter a valid email address."; $("#loginPasswordError").textContent = password.trim() ? "" : "Password is required."; return { valid: emailValid && Boolean(password.trim()), email, password }; }
+async function handleLogin(event) { event.preventDefault(); const result = validateLoginForm(); $("#loginAuthError").textContent = ""; if (!result.valid) return; const button = $("#loginButton"); button.disabled = true; button.textContent = "Logging in..."; try { const data = await api("/api/auth/login", { method: "POST", body: JSON.stringify({ email: result.email, password: result.password, remember: $("#rememberMe").checked }) }); showApplication(data.user); showToast("Login successful."); } catch (error) { $("#loginAuthError").textContent = error.status === 401 ? "Invalid email address or password." : error.status ? error.message : "Unable to connect to the authentication service. Please try again."; } finally { button.disabled = false; button.textContent = "Login"; } }
 function localDate(value) { if (!value) return null; const parts = value.split("-").map(Number); if (parts.length !== 3) return null; const date = new Date(parts[0], parts[1] - 1, parts[2]); date.setHours(0, 0, 0, 0); return Number.isNaN(date.getTime()) ? null : date; }
 function formatDate(value) { const date = localDate(value); return date ? date.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }).replace(/ /g, "-") : "Invalid date"; }
 function todayStart() { const date = new Date(); date.setHours(0, 0, 0, 0); return date; }
@@ -200,13 +208,11 @@ async function importExcelFile(file) {
   if (!/\.(xlsx|xls)$/i.test(file.name)) return showToast("Please select a supported .xlsx or .xls file.", "error");
   $("#importLoading").classList.add("show");
   try {
-    const result = parseExcelWorkbook(await readFileAsArrayBuffer(file));
-    saveProjectData(result.records);
-    refreshApplicationData();
-    const skipped = result.invalidRows.length + result.duplicateIds.length;
-    let message = skipped ? `${result.records.length} records imported. ${skipped} row${skipped === 1 ? " was" : "s were"} skipped because of invalid or duplicate data.` : `${result.records.length} team involvement record${result.records.length === 1 ? "" : "s"} imported successfully.`;
-    if (result.invalidRows.length) message += ` Invalid row${result.invalidRows.length === 1 ? "" : "s"}: ${result.invalidRows.join(", ")}.`;
-    if (result.duplicateIds.length) message += ` Skipped duplicate ID${result.duplicateIds.length === 1 ? "" : "s"}: ${result.duplicateIds.join(", ")}.`;
+    const formData = new FormData(); formData.append("file", file);
+    const result = await api("/api/import-excel", { method: "POST", body: formData });
+    await loadMembers();
+    const skipped = result.skipped;
+    let message = `${result.imported} imported, ${result.updated} updated${skipped ? `, ${skipped} skipped` : ""}.`;
     showToast(message, skipped ? "warning" : "success", skipped ? 6000 : 3000);
   } catch (error) { console.error("Excel import failed:", error.message); showToast(error.message || "Excel import failed. Please check the file and try again.", "error", 7000); }
   finally { $("#importLoading").classList.remove("show"); $("#excelInput").value = ""; }
@@ -300,18 +306,20 @@ function openMemberModal(id = null) {
   if (id) { const item = projectData.find(row => row.id === id); if (!item) return; $("#originalMemberId").value = item.id; $("#memberId").value = item.id; $("#teamMember").value = item.teamMember; $("#project").value = item.project; $("#role").value = item.role; resetMemberSkills(item.skills); $("#technologiesUsed").value = normalizeTechnologies(item.technologiesUsed).join(", "); $("#currentWork").value = item.currentWork; $("#workingWith").value = item.workingWith || ""; $("#contribution").value = item.contribution || ""; $("#memberStatus").value = normalizeStatus(item.status); $("#completionDate").value = item.expectedCompletionDate; populateBlockerPicker(item.blockers); }
   $("#memberModal").classList.add("open"); document.body.classList.add("member-modal-open"); setTimeout(() => $("#memberId").focus(), 80);
 }
-function saveMember(event) {
+async function saveMember(event) {
   event.preventDefault(); clearMemberErrors(); const original = $("#originalMemberId").value; const item = { id: $("#memberId").value.trim(), teamMember: $("#teamMember").value.trim(), project: $("#project").value.trim(), role: $("#role").value.trim(), skills: [...memberFormSkills], technologiesUsed: normalizeTechnologies($("#technologiesUsed").value), currentWork: $("#currentWork").value.trim(), workingWith: $("#workingWith").value.trim(), contribution: $("#contribution").value.trim(), status: normalizeStatus($("#memberStatus").value), expectedCompletionDate: $("#completionDate").value, blockers: selectedBlockers(), createdAt: original ? projectData.find(row => row.id === original)?.createdAt || Date.now() : Date.now() };
   const checks = [["memberId", item.id, "Employee ID is required."], ["teamMember", item.teamMember, "Team member name is required."], ["project", item.project, "Project or workstream is required."], ["role", item.role, "Role is required."], ["technologiesUsed", item.technologiesUsed.length, "Technologies Used is required."], ["currentWork", item.currentWork, "Current Work is required."], ["memberStatus", item.status, "Status is required."], ["completionDate", item.expectedCompletionDate, "Expected Completion Date is required."]];
   const invalid = checks.filter(([, value]) => !value).map(([id, , message]) => setMemberError(id, message));
   if (item.expectedCompletionDate && !localDate(item.expectedCompletionDate)) invalid.push(setMemberError("completionDate", "Enter a valid completion date."));
   if (item.id && projectData.some(row => row.id.toLowerCase() === item.id.toLowerCase() && row.id.toLowerCase() !== original.toLowerCase())) invalid.push(setMemberError("memberId", "This Employee ID already exists."));
   if (invalid.length) { invalid[0].focus(); return; }
-  if (original) projectData[projectData.findIndex(row => row.id === original)] = item; else projectData.unshift(item);
-  saveProjectData(); closeModal("memberModal"); refreshAll(); showToast(original ? "Team member updated successfully." : "Team member added successfully.");
+  const button = $("#memberSubmitBtn"), originalLabel = button.textContent; button.disabled = true; button.textContent = original ? "Updating..." : "Saving...";
+  try { await api(`/api/members${original ? `/${encodeURIComponent(original)}` : ""}`, { method: original ? "PUT" : "POST", body: JSON.stringify(item) }); closeModal("memberModal"); await loadMembers(); showToast(original ? "Team member updated successfully." : "Team member added successfully."); }
+  catch (error) { showToast(error.message || (original ? "Unable to update team member." : "Unable to add team member."), "error"); }
+  finally { button.disabled = false; button.textContent = original ? "Update Member" : "Save Member"; }
 }
 function editMember(id) { openMemberModal(id); }
-function deleteMember(id) { const item = projectData.find(row => row.id === id); if (!item) return; askConfirmation("Delete this record?", `${item.teamMember}'s involvement in ${item.project} will be permanently removed.`, () => { projectData = projectData.filter(row => row.id !== id); saveProjectData(); refreshAll(); showToast("Member involvement deleted."); }); }
+function deleteMember(id) { const item = projectData.find(row => row.id === id); if (!item) return; askConfirmation("Delete this record?", `${item.teamMember}'s involvement in ${item.project} will be permanently removed.`, async () => { try { await api(`/api/members/${encodeURIComponent(id)}`, { method: "DELETE" }); await loadMembers(); showToast("Team member deleted successfully."); } catch (error) { showToast(error.message || "Unable to delete team member.", "error"); } }); }
 function showDetails(id) { const item = projectData.find(row => row.id === id); if (!item) return; $("#detailsTitle").textContent = item.teamMember; const fields = [["S.No / Employee ID", item.id], ["Team Member", item.teamMember], ["Project / Workstream", item.project], ["Role", item.role], ["Current Work", item.currentWork], ["Working With", item.workingWith || "—"], ["Contribution / Value Add", item.contribution || "—"], ["Status", item.status], ["Expected Completion Date", formatDate(item.expectedCompletionDate)], ["Blockers / Support Required", blockerText(item.blockers)]]; $("#detailsContent").innerHTML = `<div class="detail-grid">${fields.map(([label, value]) => `<div><small>${label}</small><strong>${escapeHTML(value)}</strong></div>`).join("")}</div>`; $("#detailsModal").classList.add("open"); }
 
 /* Reports */
@@ -330,7 +338,7 @@ function applySettings() {
   roleSelect.value = settings.role; $("#themeToggle").checked = settings.theme === "dark"; $$('[data-notification-key]').forEach(toggle => toggle.checked = Boolean(settings[toggle.dataset.notificationKey])); $("#languageSelect").value = settings.language; document.body.classList.toggle("dark", settings.theme === "dark");
 }
 function setTheme(theme) { settings.theme = theme; saveSettings(); applySettings(); renderStatusChart(); renderReports(); }
-function clearAllProjectData() { askConfirmation("Clear All Data?", "This will permanently remove all imported team project data. Your profile and preferences will remain.", () => { projectData = []; localStorage.removeItem(DATA_KEY); refreshAll(); showToast("All team project data cleared."); }, "Clear Data"); }
+function clearAllProjectData() { askConfirmation("Clear All Data?", "This will permanently remove all imported team project data. Your profile and preferences will remain.", async () => { try { await api("/api/members", { method: "DELETE" }); await loadMembers(); showToast("All team project data cleared."); } catch (error) { showToast(error.message || "Unable to clear team project data.", "error"); } }, "Clear Data"); }
 function activateSettingsTab(tab) { if (!["profile", "preferences", "notifications", "security"].includes(tab)) return; activeSettingsTab = tab; $$("[data-settings-tab]").forEach(button => { const active = button.dataset.settingsTab === tab; button.classList.toggle("active", active); button.setAttribute("aria-selected", String(active)); }); $$("[data-settings-panel]").forEach(panel => { const active = panel.dataset.settingsPanel === tab; panel.hidden = !active; panel.classList.toggle("active", active); }); }
 function askConfirmation(title, text, action, confirmLabel = "Confirm") { $("#confirmTitle").textContent = title; $("#confirmText").textContent = text; $("#confirmAction").textContent = confirmLabel; pendingConfirmation = action; $("#confirmModal").classList.add("open"); }
 function closeModal(id) { $("#" + id)?.classList.remove("open"); if (id === "memberModal") { document.body.classList.remove("member-modal-open"); clearMemberErrors(); $("#memberForm").reset(); resetBlockerPicker(); resetMemberSkills(); $("#originalMemberId").value = ""; $("#memberModalTitle").textContent = "Add Member"; $("#memberSubmitBtn").textContent = "Save Member"; } }
@@ -347,13 +355,24 @@ function switchPage(page, historyMode = "push") { if (!getAuthSession()) { showL
 function page(name) { switchPage(name); }
 function refreshAll() { renderDashboardStats(); renderCurrentTeamInvolvement(); renderUpcomingDeadlines(); populateProjectFilters(); populateRoleFilters(); renderTeamMembers(); renderStatusChart(); renderReports(); $("#navMemberCount").textContent = unique(projectData.map(item => item.teamMember.toLowerCase())).length; }
 
+const validEmail = value => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+async function submitRegister(event) { event.preventDefault(); const name = $("#registerName").value.trim(), email = $("#registerEmail").value.trim(), password = $("#registerPassword").value, confirm = $("#registerPasswordConfirm").value; $("#registerNameError").textContent = name ? "" : "Please enter your full name."; $("#registerEmailError").textContent = validEmail(email) ? "" : "Please enter a valid email address."; $("#registerPasswordError").textContent = password.length >= 12 ? "" : "Password must be at least 12 characters."; $("#registerPasswordConfirmError").textContent = confirm === password ? "" : "Passwords do not match."; $("#registerAuthError").textContent = ""; if (!name || !validEmail(email) || password.length < 12 || confirm !== password) return; const button = $("#registerButton"); button.disabled = true; button.textContent = "Creating Account..."; try { const data = await api("/api/auth/register", { method: "POST", body: JSON.stringify({ name, email, password }) }); if (!data.authenticated || !data.user) throw new Error("Unable to create an authenticated session. Please try again."); event.target.reset(); $("#registerAuthError").textContent = ""; showApplication(data.user); showToast("Account created successfully."); } catch (error) { $("#registerAuthError").textContent = error.status === 409 ? "An account with this email already exists. Please login instead." : error.status ? error.message : "Unable to connect to the authentication service. Please try again."; } finally { button.disabled = false; button.textContent = "Create Account"; } }
+async function submitForgot(event) { event.preventDefault(); const email = $("#forgotEmail").value.trim().toLowerCase(); $("#forgotEmailError").textContent = validEmail(email) ? "" : "Please enter a valid email address."; $("#forgotAuthError").textContent = ""; $("#forgotNotice").textContent = ""; if (!validEmail(email)) return; const button = $("#forgotButton"); button.disabled = true; button.textContent = "Sending..."; try { const data = await api("/api/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }); if (data.developmentResetToken) { $("#resetCard").dataset.token = data.developmentResetToken; showAuthView("reset"); } else { $("#forgotNotice").textContent = data.message; } } catch (error) { $("#forgotAuthError").textContent = error.message; } finally { button.disabled = false; button.textContent = "Send Reset Link"; } }
+async function submitReset(event) { event.preventDefault(); const password = $("#resetPassword").value, confirm = $("#resetPasswordConfirm").value; $("#resetPasswordError").textContent = password.length >= 12 ? "" : "Use at least 12 characters."; $("#resetPasswordConfirmError").textContent = confirm === password ? "" : "Passwords do not match."; $("#resetAuthError").textContent = ""; if (password.length < 12 || confirm !== password) return; const button = $("#resetButton"); button.disabled = true; button.textContent = "Resetting..."; try { const data = await api("/api/auth/reset-password", { method: "POST", body: JSON.stringify({ token: $("#resetCard").dataset.token, newPassword: password }) }); showApplication(data.user); showToast("Password reset successfully."); history.replaceState({}, "", location.pathname + "#dashboard"); } catch (error) { $("#resetAuthError").textContent = error.message; } finally { button.disabled = false; button.textContent = "Reset Password"; } }
+
 /* Event wiring */
 $("#loginForm").addEventListener("submit", handleLogin);
 $("#loginForm").addEventListener("input", event => { if (event.target.id === "loginEmail") $("#loginEmailError").textContent = ""; if (event.target.id === "loginPassword") $("#loginPasswordError").textContent = ""; $("#loginAuthError").textContent = ""; });
 $("#toggleLoginPassword").addEventListener("click", () => { const input = $("#loginPassword"), show = input.type === "password"; input.type = show ? "text" : "password"; $("#toggleLoginPassword").setAttribute("aria-label", show ? "Hide password" : "Show password"); });
-$("#forgotPassword").addEventListener("click", () => showAuthNotice("Please contact your administrator to reset your password."));
-$("#googleSignIn").addEventListener("click", () => showAuthNotice("Google sign-in is not configured."));
-$("#contactAdmin").addEventListener("click", () => showAuthNotice("Please contact your TaskFlow administrator for account access."));
+$("#forgotPassword").addEventListener("click", () => showAuthView("forgot"));
+$("#showRegister").addEventListener("click", () => showAuthView("register"));
+$$('[data-show-auth]').forEach(button => button.addEventListener("click", () => showAuthView(button.dataset.showAuth)));
+$("#registerForm").addEventListener("submit", submitRegister);
+$("#forgotForm").addEventListener("submit", submitForgot);
+$("#resetForm").addEventListener("submit", submitReset);
+$$('#registerForm, #forgotForm, #resetForm').forEach(form => form.addEventListener("input", () => { $$('.auth-field-error, .auth-form-error, .auth-notice', form).forEach(node => node.textContent = ""); }));
+$$('[data-auth-password-toggle]').forEach(button => button.addEventListener("click", () => { const input = $("#" + button.dataset.authPasswordToggle), show = input.type === "password"; input.type = show ? "text" : "password"; button.setAttribute("aria-label", show ? "Hide password" : "Show password"); }));
+$("#googleSignIn").addEventListener("click", () => { const button = $("#googleSignIn"); button.disabled = true; button.lastChild.textContent = "Connecting to Google..."; location.assign("/api/auth/google"); });
 document.addEventListener("keydown", event => { if (!getAuthSession() && event.ctrlKey) event.stopImmediatePropagation(); }, true);
 $$('[data-import]').forEach(button => button.addEventListener("click", () => $("#excelInput").click()));
 $("#excelInput").addEventListener("change", event => importExcelFile(event.target.files[0]));
@@ -381,9 +400,9 @@ $$('[data-close]').forEach(button => button.addEventListener("click", () => clos
 $$('.modal-backdrop').forEach(backdrop => backdrop.addEventListener("click", event => { if (event.target === backdrop) closeModal(backdrop.id); }));
 $("#clearDataBtn").addEventListener("click", clearAllProjectData);
 $("#confirmAction").addEventListener("click", () => { const action = pendingConfirmation; pendingConfirmation = null; closeModal("confirmModal"); action?.(); });
-$("#profileForm").addEventListener("submit", event => { event.preventDefault(); const name = $("#nameInput").value.trim(), email = $("#emailInput").value.trim(), emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email); $("#nameError").textContent = name ? "" : "Full Name is required."; $("#emailError").textContent = email ? (emailValid ? "" : "Enter a valid email address.") : "Email Address is required."; if (!name || !emailValid) return; settings.name = name; settings.email = email; settings.role = $("#roleSelect").value; saveSettings(); applySettings(); showToast("Profile updated successfully."); });
+$("#profileForm").addEventListener("submit", async event => { event.preventDefault(); const name = $("#nameInput").value.trim(), email = $("#emailInput").value.trim(), emailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email); $("#nameError").textContent = name ? "" : "Full Name is required."; $("#emailError").textContent = email ? (emailValid ? "" : "Enter a valid email address.") : "Email Address is required."; if (!name || !emailValid) return; const button = event.target.querySelector('button[type="submit"]'); button.disabled = true; button.textContent = "Saving..."; try { const user = await api("/api/profile", { method: "PUT", body: JSON.stringify({ name, email, role: $("#roleSelect").value }) }); useAuthenticatedUser(user); showToast("Profile updated successfully."); } catch (error) { showToast(error.message || "Unable to update profile.", "error"); } finally { button.disabled = false; button.textContent = "Save Changes"; } });
 $("#profileForm").addEventListener("input", event => { const error = event.target.id === "nameInput" ? $("#nameError") : event.target.id === "emailInput" ? $("#emailError") : null; if (error) error.textContent = ""; });
-$("#passwordForm").addEventListener("submit", event => { event.preventDefault(); const current = $("#currentPassword").value, next = $("#newPassword").value, confirm = $("#confirmPassword").value; $("#currentPasswordError").textContent = current.trim() ? "" : "Current Password is required."; $("#newPasswordError").textContent = next.trim() ? "" : "New Password is required."; $("#confirmPasswordError").textContent = !confirm.trim() ? "Confirm New Password is required." : confirm === next ? "" : "Passwords do not match."; if (!current.trim() || !next.trim() || !confirm.trim() || confirm !== next) return; event.target.reset(); showToast("Password updated for this local demo session."); });
+$("#passwordForm").addEventListener("submit", async event => { event.preventDefault(); const current = $("#currentPassword").value, next = $("#newPassword").value, confirm = $("#confirmPassword").value; $("#currentPasswordError").textContent = current.trim() ? "" : "Current Password is required."; $("#newPasswordError").textContent = next.length >= 12 ? "" : "Use at least 12 characters."; $("#confirmPasswordError").textContent = !confirm.trim() ? "Confirm New Password is required." : confirm === next ? "" : "Passwords do not match."; if (!current.trim() || next.length < 12 || confirm !== next) return; const button = event.target.querySelector('button[type="submit"]'); button.disabled = true; try { await api("/api/auth/change-password", { method: "POST", body: JSON.stringify({ currentPassword: current, newPassword: next }) }); event.target.reset(); showToast("Password updated successfully."); } catch (error) { $("#currentPasswordError").textContent = error.message; } finally { button.disabled = false; } });
 $("#passwordForm").addEventListener("input", event => { const error = $(`#${event.target.id}Error`); if (error) error.textContent = ""; });
 $$('[data-password-toggle]').forEach(button => button.addEventListener("click", () => { const input = $("#" + button.dataset.passwordToggle), show = input.type === "password"; input.type = show ? "text" : "password"; button.textContent = show ? "⊘" : "◉"; button.setAttribute("aria-label", `${show ? "Hide" : "Show"} ${button.dataset.passwordToggle === "newPassword" ? "new" : "confirm"} password`); }));
 $$('[data-settings-tab]').forEach(button => button.addEventListener("click", () => activateSettingsTab(button.dataset.settingsTab)));
