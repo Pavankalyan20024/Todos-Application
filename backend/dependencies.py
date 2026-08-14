@@ -15,8 +15,10 @@ def current_user(request: Request, db: Session = Depends(get_db)) -> User:
 
 
 def require_roles(*roles):
+    allowed = {role.lower() for role in roles}
+
     def dependency(user: User = Depends(current_user)):
-        if user.role not in roles:
+        if (user.role or "").lower() not in allowed:
             raise HTTPException(status_code=403, detail="You do not have permission to perform this action.")
         return user
     return dependency

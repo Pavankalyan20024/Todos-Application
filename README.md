@@ -22,6 +22,7 @@ API documentation is available at `/docs` and `/redoc`; health status is availab
 - Employee ID is unique. Excel imports update an existing row with the same Employee ID and insert new IDs.
 - Passwords are bcrypt hashes; session cookies are HTTP-only and become Secure when `ENVIRONMENT=production`.
 - Keep `.env` uncommitted and serve production deployments over HTTPS.
+- Public registrations are always employees. To assign the initial administrator through a server-controlled process, set `TASKFLOW_BOOTSTRAP_ADMIN_EMAIL` to an existing account email and restart TaskFlow.
 - Automatic table creation is retained for the local POC. Introduce Alembic before production schema changes.
 
 Non-sensitive UI preferences (theme, language, and notification toggles) remain in Local Storage; it is no longer the source of truth for members or authentication.

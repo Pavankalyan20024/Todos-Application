@@ -4,6 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 Status = Literal["Ongoing", "Completed", "On Hold", "Not Started", "Blocked"]
+AccessLevel = Literal["admin", "manager", "employee"]
 
 
 class MemberBase(BaseModel):
@@ -11,6 +12,7 @@ class MemberBase(BaseModel):
     team_member: str = Field(alias="teamMember", min_length=1, max_length=80)
     project_workstream: str = Field(alias="project", min_length=1, max_length=100)
     role: str = Field(min_length=1, max_length=100)
+    access_level: AccessLevel = Field(default="employee", alias="accessLevel")
     current_work: str = Field(alias="currentWork", min_length=1, max_length=2000)
     technologies: list[str] = Field(default_factory=list, alias="technologiesUsed")
     skills: list[str] = Field(default_factory=list)
@@ -75,6 +77,10 @@ class ProfileUpdate(BaseModel):
     name: str = Field(min_length=2, max_length=100)
     email: EmailStr
     role: str = Field(min_length=1, max_length=80)
+
+
+class AccessLevelUpdate(BaseModel):
+    access_level: AccessLevel = Field(alias="accessLevel")
 
 
 class PasswordChange(BaseModel):

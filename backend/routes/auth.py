@@ -14,7 +14,11 @@ router = APIRouter(tags=["authentication"])
 
 
 def safe(user):
-    return {"id": str(user.id), "name": user.full_name, "email": user.email, "role": user.role, "authProvider": user.auth_provider}
+    return {
+        "id": user.id, "name": user.full_name, "email": user.email,
+        "role": user.job_role, "accessLevel": user.role.lower(),
+        "authProvider": user.auth_provider,
+    }
 
 
 def begin_session(request, user):
@@ -35,7 +39,8 @@ def register(payload: UserRegister, request: Request, db: Session = Depends(get_
     email = str(payload.email).strip().lower()
     if db.query(User).filter(User.email == email).first():
         raise HTTPException(409, "An account with this email already exists.")
-    user = User(full_name=payload.name.strip(), email=email, password_hash=hash_password(payload.password))
+    # Public registration never accepts or derives a privileged role.
+    user = User(full_name=payload.name.strip(), email=email, password_hash=hash_password(payload.password), role="employee")
     db.add(user)
     try:
         db.commit()

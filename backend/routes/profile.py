@@ -20,8 +20,8 @@ def get_profile(user: User = Depends(current_user)):
 def update_profile(payload: ProfileUpdate, db: Session = Depends(get_db), user: User = Depends(current_user)):
     user.full_name = payload.name.strip()
     user.email = str(payload.email).lower()
-    user.role = payload.role.strip()
-    db.add(AuditLog(user_id=user.id, action="profile_updated", entity_type="user", entity_id=str(user.id)))
+    user.job_role = payload.role.strip()
+    db.add(AuditLog(user_id=user.id, role=user.role, action="profile_updated", entity_type="user", entity_id=str(user.id)))
     try:
         db.commit()
     except IntegrityError:

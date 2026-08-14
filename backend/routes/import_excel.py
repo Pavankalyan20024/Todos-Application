@@ -6,7 +6,7 @@ from openpyxl import load_workbook
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..dependencies import current_user
+from ..dependencies import require_roles
 from ..models import AuditLog, Member, User
 
 router = APIRouter(tags=["excel"])
@@ -16,7 +16,8 @@ ALIASES = {
     "sno": "employee_id", "serial no": "employee_id", "employee id": "employee_id", "id": "employee_id",
     "team member": "team_member", "member name": "team_member", "employee name": "team_member",
     "project/workstream": "project_workstream", "project workstream": "project_workstream", "project": "project_workstream", "workstream": "project_workstream",
-    "role": "role", "current work": "current_work", "technologies used": "technologies", "technology": "technologies", "technologies": "technologies", "technology/skills": "technologies",
+    "role": "role", "access level": "access_level", "access role": "access_level", "system role": "access_level", "permission level": "access_level",
+    "current work": "current_work", "technologies used": "technologies", "technology": "technologies", "technologies": "technologies", "technology/skills": "technologies",
     "skills/expertise": "skills", "skills": "skills", "working with": "working_with", "contribution/value add": "contribution_value_add", "contribution": "contribution_value_add",
     "status": "status", "expected completion date": "expected_completion_date", "expected completion": "expected_completion_date", "completion date": "expected_completion_date",
     "blockers/support required": "blockers", "blockers": "blockers", "support required": "blockers",
@@ -34,7 +35,7 @@ def values(value):
 
 
 @router.post("/import-excel")
-async def import_excel(file: UploadFile = File(...), db: Session = Depends(get_db), user: User = Depends(current_user)):
+async def import_excel(file: UploadFile = File(...), db: Session = Depends(get_db), user: User = Depends(require_roles("admin"))):
     if not file.filename or not file.filename.lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(400, "Please select a supported .xlsx Excel file.")
     content = await file.read(MAX_UPLOAD + 1)
@@ -70,6 +71,13 @@ async def import_excel(file: UploadFile = File(...), db: Session = Depends(get_d
             member.team_member = str(raw["team_member"]).strip()
             member.project_workstream = str(raw["project_workstream"]).strip()
             member.role = str(raw["role"]).strip()
+            if raw.get("access_level") not in (None, ""):
+                access_level = str(raw["access_level"]).strip().lower()
+                if access_level not in {"admin", "manager", "employee"}:
+                    raise ValueError("invalid access level")
+                member.access_level = access_level
+            elif not existed:
+                member.access_level = "employee"
             member.current_work = str(raw["current_work"]).strip()
             member.working_with = str(raw.get("working_with") or "").strip()
             member.contribution_value_add = str(raw.get("contribution_value_add") or "").strip()
@@ -88,6 +96,6 @@ async def import_excel(file: UploadFile = File(...), db: Session = Depends(get_d
         except Exception as error:
             skipped += 1
             errors.append({"row": row_number, "message": str(error)})
-    db.add(AuditLog(user_id=user.id, action="excel_imported", entity_type="member", entity_id=file.filename))
+    db.add(AuditLog(user_id=user.id, role=user.role, action="excel_imported", entity_type="member", entity_id=file.filename))
     db.commit()
     return {"success": True, "imported": imported, "updated": updated, "skipped": skipped, "errors": errors[:50]}

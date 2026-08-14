@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Column, Date, DateTime, ForeignKey, Integer, String, Table, Text
+from sqlalchemy import JSON, CheckConstraint, Column, Date, DateTime, ForeignKey, Integer, String, Table, Text
 
 from .database import Base
 
@@ -22,11 +22,13 @@ def utcnow():
 
 class User(Base):
     __tablename__ = "users"
+    __table_args__ = (CheckConstraint("role IN ('admin', 'manager', 'employee')", name="ck_users_role"),)
     id = Column(Integer, primary_key=True)
     full_name = Column(String(100), nullable=False)
     email = Column(String(254), nullable=False, unique=True, index=True)
     password_hash = Column(String(255))
-    role = Column(String(80), nullable=False, default="Project Manager")
+    job_role = Column(String(80), nullable=False, default="Employee")
+    role = Column(String(20), nullable=False, default="employee")
     auth_provider = Column(String(30), nullable=False, default="password")
     session_version = Column(Integer, nullable=False, default=1)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
@@ -45,11 +47,13 @@ class PasswordResetToken(Base):
 
 class Member(Base):
     __tablename__ = "members"
+    __table_args__ = (CheckConstraint("access_level IN ('admin', 'manager', 'employee')", name="ck_members_access_level"),)
     id = Column(Integer, primary_key=True)
     employee_id = Column(String(40), nullable=False, unique=True, index=True)
     team_member = Column(String(80), nullable=False)
     project_workstream = Column(String(100), nullable=False, index=True)
     role = Column(String(100), nullable=False)
+    access_level = Column(String(20), nullable=False, default="employee")
     current_work = Column(Text, nullable=False)
     working_with = Column(String(150), nullable=False, default="")
     contribution_value_add = Column(Text, nullable=False, default="")
@@ -84,6 +88,7 @@ class AuditLog(Base):
     __tablename__ = "audit_logs"
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    role = Column(String(20), nullable=False, default="employee")
     action = Column(String(60), nullable=False)
     entity_type = Column(String(40), nullable=False)
     entity_id = Column(String(80))

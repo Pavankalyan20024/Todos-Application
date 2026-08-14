@@ -6,11 +6,11 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from starlette.middleware.sessions import SessionMiddleware
 
 from .database import Base, engine
-from .routes import auth, dashboard, import_excel, members, profile, reports
+from .routes import admin, auth, dashboard, import_excel, members, profile, reports
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
@@ -49,12 +49,30 @@ app.include_router(dashboard.router, prefix="/api")
 app.include_router(reports.router, prefix="/api")
 app.include_router(profile.router, prefix="/api")
 app.include_router(import_excel.router, prefix="/api")
+app.include_router(admin.router, prefix="/api/admin")
 
 
 @app.on_event("startup")
 def create_tables():
     # Suitable for this POC; use Alembic before production schema changes.
     Base.metadata.create_all(bind=engine)
+    # Lightweight compatibility migration for existing POC databases.
+    with engine.begin() as connection:
+        db_inspector = inspect(connection)
+        audit_columns = {column["name"] for column in db_inspector.get_columns("audit_logs")}
+        if "role" not in audit_columns:
+            connection.execute(text("ALTER TABLE audit_logs ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'employee'"))
+        user_columns = {column["name"] for column in db_inspector.get_columns("users")}
+        if "job_role" not in user_columns:
+            connection.execute(text("ALTER TABLE users ADD COLUMN job_role VARCHAR(80) NOT NULL DEFAULT 'Employee'"))
+            connection.execute(text("UPDATE users SET job_role = role WHERE lower(role) NOT IN ('admin', 'manager', 'employee')"))
+        member_columns = {column["name"] for column in db_inspector.get_columns("members")}
+        if "access_level" not in member_columns:
+            connection.execute(text("ALTER TABLE members ADD COLUMN access_level VARCHAR(20) NOT NULL DEFAULT 'employee'"))
+        connection.execute(text("UPDATE users SET role = 'employee' WHERE lower(role) NOT IN ('admin', 'manager', 'employee') OR role IS NULL"))
+        bootstrap_email = os.getenv("TASKFLOW_BOOTSTRAP_ADMIN_EMAIL", "").strip().lower()
+        if bootstrap_email:
+            connection.execute(text("UPDATE users SET role = 'admin' WHERE lower(email) = :email"), {"email": bootstrap_email})
 
 
 @app.exception_handler(HTTPException)
